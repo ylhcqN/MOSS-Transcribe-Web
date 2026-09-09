@@ -22,9 +22,6 @@ mossweb.settings.json
 # 模型 648 MB；核心的 .so 每个 50~74 MB，而且后端是编译期绑定的，换台机器基本要重编。
 # 想让仓库自包含（把核心一起提交）的话，删掉下面 core/ 那三行即可。
 model/*.gguf
-core/**/*.so
-core/**/moss-transcribe
-core/**/vulkan-shaders-gen
 
 # ---- Gradio ----
 .gradio/
