@@ -19,6 +19,8 @@ DEFAULTS = {
     "max_new": -1,              # <=0 表示用 GGUF 里的默认值
     "max_audio_minutes": 60,
     "timeout_minutes": 120,
+    "segmented": False,            # 分段处理：按固定时长切片，逐段转写后合并
+    "segment_seconds": 60,         # 切片时长（秒），默认每分钟一段
     "last_model": "",
 }
 

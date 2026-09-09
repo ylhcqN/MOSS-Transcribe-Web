@@ -24,6 +24,7 @@ DEFAULT_MODEL = ROOT / "model" / "moss-transcribe-q5_k.gguf"
 MODEL_DIRS = [ROOT / "model"]
 
 TABLE_HEADERS = ["#", "开始", "结束", "说话人", "文本"]
+SEG_HEADERS = ["#", "说话人", "文本"]
 
 
 # --------------------------------------------------------------------------
@@ -118,13 +119,26 @@ def join_cmd(cmd: list[str]) -> str:
 # --------------------------------------------------------------------------
 
 def do_transcribe(audio_path, model, backend, hsa, out_fmt, max_new,
-                  device, threads, max_minutes, timeout_minutes):
-    status = gr.update
+                  device, threads, max_minutes, timeout_minutes,
+                  segmented, seg_seconds):
     # --- 输入校验 ---
     if not audio_path:
         gr.Warning("请先上传一个音频文件。")
         yield ("❌ 请先上传音频文件。", "", "", [], None, "")
         return
+
+    segmented = bool(segmented)
+    if segmented:
+        try:
+            seg_seconds = int(seg_seconds or 0)
+        except (TypeError, ValueError):
+            seg_seconds = 0
+        if seg_seconds < 10:
+            seg_seconds = 60
+        out_fmt = "json"  # 分段处理强制 JSON 输出，并关闭时间标注
+    else:
+        seg_seconds = 0
+
     if not model or not Path(str(model).strip()).is_file():
         gr.Warning("模型路径无效。")
         yield ("❌ 模型文件不存在，请检查路径。", "", "", [], None, "")
@@ -148,6 +162,7 @@ def do_transcribe(audio_path, model, backend, hsa, out_fmt, max_new,
             "output_format": out_fmt, "max_new": max_new,
             "max_audio_minutes": float(max_minutes or 0),
             "timeout_minutes": float(timeout_minutes or 0),
+            "segmented": segmented, "segment_seconds": seg_seconds,
             "last_model": str(model),
         })
     except Exception:
@@ -163,7 +178,7 @@ def do_transcribe(audio_path, model, backend, hsa, out_fmt, max_new,
         yield (f"❌ 音频预处理出错：{e}", "", "", [], None, "")
         return
 
-    req = engine.RunRequest(
+    base_req = engine.RunRequest(
         model=str(model).strip(), wav=str(wav), backend=backend,
         output_format=out_fmt, max_new=max_new,
         hsa_override_gfx_version=str(hsa or engine.DEFAULT_HSA_OVERRIDE_GFX_VERSION),
@@ -180,10 +195,73 @@ def do_transcribe(audio_path, model, backend, hsa, out_fmt, max_new,
     head = (f"音频 {duration:.1f}s（{duration / 60:.1f} 分钟）｜ 后端 {backend_used} ｜ "
             f"格式 {out_fmt}")
     if backend_used == "rocm":
-        head += f" ｜ HSA_OVERRIDE_GFX_VERSION={req.hsa_override_gfx_version}"
+        head += f" ｜ HSA_OVERRIDE_GFX_VERSION={base_req.hsa_override_gfx_version}"
 
+    # ---------- 分段处理：切片 → 逐段转写 → 合并 ----------
+    if segmented:
+        try:
+            segs = audio_mod.split_wav(wav, seg_seconds)
+        except audio_mod.AudioError as e:
+            yield (f"❌ 切片失败：{e}", "", "", [], None, "")
+            return
+        except Exception as e:
+            yield (f"❌ 切片出错：{type(e).__name__}: {e}", "", "", [], None, "")
+            return
+
+        merged = []
+        total = len(segs)
+        last_log, last_info = "", ""
+        for idx, seg in enumerate(segs, 1):
+            seg_req = engine.RunRequest(
+                model=base_req.model, wav=str(seg), backend=base_req.backend,
+                output_format="json", max_new=base_req.max_new,
+                hsa_override_gfx_version=base_req.hsa_override_gfx_version,
+                mtd_device=base_req.mtd_device, mtd_threads=base_req.mtd_threads,
+                timeout=base_req.timeout,
+            )
+            try:
+                for ev in engine.run_stream(seg_req):
+                    if not ev.get("done"):
+                        yield (f"⏳ 分段处理 {idx}/{total}（每段 {seg_seconds}s）… "
+                               f"本段已用 {ev['elapsed']:.1f}s ｜ {head}",
+                               ev.get("log", ""), "", [], None, "")
+                        continue
+                    r = ev["result"]
+                    last_log = r.log or ""
+                    last_info = (
+                        f"**命令**：`{join_cmd(r.cmd)}`\n\n"
+                        f"**二进制**：`{r.binary}`\n\n"
+                        f"**LD_LIBRARY_PATH**：`{engine.BACKEND_DIRS[r.backend]}`\n\n"
+                        f"**退出码**：`{r.exit_code}`"
+                    )
+                    if not r.ok:
+                        err = f"❌ 第 {idx}/{total} 段转写失败：{r.error}"
+                        if r.log.strip():
+                            err += f"\n\n核心日志：\n```\n{r.log.strip()[-1500:]}\n```"
+                        yield (err, last_log, "", [], None, last_info)
+                        return
+                    merged.extend(engine.parse_speaker_text(r.text))
+            except engine.EngineError as e:
+                yield (f"❌ 第 {idx}/{total} 段：{e}", last_log, "", [], None, last_info)
+                return
+            except Exception as e:
+                yield (f"❌ 第 {idx}/{total} 段未预期错误：{type(e).__name__}: {e}",
+                       last_log, "", [], None, last_info)
+                return
+
+        merged_text = json.dumps(merged, ensure_ascii=False, indent=2)
+        out_file = engine.dump_segmented(merged_text, str(wav))
+        rows = [[i, seg.get("speaker", ""), seg.get("text", "")]
+                for i, seg in enumerate(merged, 1)]
+        ok_md = (f"✅ 分段处理完成 ｜ 共 {total} 段 ｜ 后端 {backend_used} ｜ "
+                 f"合并出 {len(merged)} 条字幕（已关闭时间标注，仅保留 speaker / text）。")
+        yield (ok_md, last_log, merged_text,
+               gr.update(value=rows, headers=SEG_HEADERS), str(out_file), last_info)
+        return
+
+    # ---------- 单次处理（原逻辑） ----------
     try:
-        for ev in engine.run_stream(req):
+        for ev in engine.run_stream(base_req):
             if not ev.get("done"):
                 yield (f"⏳ 转写中… 已用 {ev['elapsed']:.1f}s ｜ {head}",
                        ev.get("log", ""), "", [], None, "")
@@ -202,10 +280,10 @@ def do_transcribe(audio_path, model, backend, hsa, out_fmt, max_new,
                 err = f"❌ {r.error}"
                 if r.log.strip():
                     err += f"\n\n核心日志：\n```\n{r.log.strip()[-1500:]}\n```"
-                yield (err, log, "", [], None, info_md)
+                yield (err, log, "", gr.update(value=[], headers=TABLE_HEADERS), info_md)
                 return
 
-            out_file = engine.dump_text(req, r.text, str(wav))
+            out_file = engine.dump_text(base_req, r.text, str(wav))
             rows = segments_to_rows(r.text) if out_fmt == "json" else []
 
             dev = f" ｜ 实际设备 {r.device}" if r.device else ""
@@ -213,7 +291,8 @@ def do_transcribe(audio_path, model, backend, hsa, out_fmt, max_new,
                      f"音频 {duration:.1f}s（RTF {r.elapsed / max(duration, 0.01):.2f}）")
             if out_fmt == "json" and not rows:
                 ok_md += "\n\n⚠️ JSON 解析为空，可能模型没有输出有效分段，请看「转写结果」原始内容。"
-            yield (ok_md, log, r.text, rows, str(out_file), info_md)
+            yield (ok_md, log, r.text, gr.update(value=rows, headers=TABLE_HEADERS),
+                   str(out_file), info_md)
             return
     except engine.EngineError as e:
         yield (f"❌ {e}", "", "", [], None, "")
@@ -294,6 +373,21 @@ def build_ui(settings: dict) -> gr.Blocks:
                              "调得太小会把转写结果硬截断；官方示例给的是 4096。",
                     )
 
+                with gr.Row():
+                    segmented_cb = gr.Checkbox(
+                        value=bool(settings.get("segmented", False)),
+                        label="分段处理（按固定时长切片，逐段转写后合并）",
+                        info="开启后按「切片时长」把音频切成多段、逐段转写再合并，"
+                             "避免长音频一次性解码拖垮设备；同时强制 JSON 输出并关闭时间标注，"
+                             "每条结果只保留 说话人(speaker) 与 文本(text)。",
+                    )
+                    seg_seconds_nb = gr.Number(
+                        value=int(settings.get("segment_seconds", 60)),
+                        minimum=10, precision=0, label="切片时长（秒，默认 60）",
+                        visible=bool(settings.get("segmented", False)),
+                        info="每段的长度。默认 60 即「每分钟一段」。段越多、模型重复加载次数越多。",
+                    )
+
                 gr.Markdown("### 核心 / 后端")
                 backend_radio = gr.Radio(
                     choices=["auto", "rocm", "vulkan"],
@@ -359,10 +453,23 @@ def build_ui(settings: dict) -> gr.Blocks:
         refresh_btn.click(refresh_models, outputs=[model_dd])
         backend_radio.change(toggle_hsa, inputs=[backend_radio], outputs=[hsa_tb])
 
+        def toggle_segmented(on):
+            if on:
+                return (gr.update(value="json", interactive=False),
+                        gr.update(visible=True))
+            return (gr.update(value=settings.get("output_format", "srt"),
+                               interactive=True),
+                    gr.update(visible=False))
+        segmented_cb.change(
+            toggle_segmented, inputs=[segmented_cb],
+            outputs=[out_fmt, seg_seconds_nb],
+        )
+
         run_btn.click(
             do_transcribe,
             inputs=[audio_in, model_dd, backend_radio, hsa_tb, out_fmt, max_new_nb,
-                    device_dd, threads_nb, max_min_nb, timeout_nb],
+                    device_dd, threads_nb, max_min_nb, timeout_nb,
+                    segmented_cb, seg_seconds_nb],
             outputs=[status_md, log_tb, out_text, out_table, dl_file, runinfo_md],
         )
         cancel_btn.click(do_cancel, outputs=[status_md])

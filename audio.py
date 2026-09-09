@@ -103,6 +103,44 @@ def ensure_wav(src: str | Path, max_minutes: float) -> tuple[Path, float]:
     return dst, duration
 
 
+def split_wav(src: str | Path, segment_seconds: float = 60.0) -> list[Path]:
+    """把 WAV 按固定时长切成多段，返回每段 WAV 路径列表（按文件名排序）。
+
+    用 ffmpeg segment 复用音轨（16k 单声道 pcm_s16le），不损失质量；每段时间戳重置为 0，
+    因为分段模式下时间戳本就不可靠，输出会丢弃时间标注。切片产物落在 runtime/tmp/，
+    下次启动会被 cleanup() 清掉。
+    """
+    require_ffmpeg()
+    src = Path(src)
+    if not src.is_file():
+        raise AudioError(f"要切片的 WAV 不存在：{src}")
+    try:
+        seg = float(segment_seconds)
+    except (TypeError, ValueError):
+        seg = 60.0
+    if seg < 10:
+        seg = 60.0
+
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    base = src.stem[:60]
+    out_pattern = WORK_DIR / (base + "_seg_%03d.wav")
+    p = _run([
+        FFMPEG, "-y", "-nostdin", "-i", str(src),
+        "-vn", "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+        "-f", "segment", "-segment_time", f"{seg:.3f}", "-reset_timestamps", "1",
+        str(out_pattern),
+    ], timeout=300)
+    if p.returncode != 0:
+        raise AudioError(
+            "ffmpeg 切片失败，没能切出可用的分段。\n"
+            f"ffmpeg 报错：{(p.stderr or '').strip()[-800:]}"
+        )
+    parts = sorted(WORK_DIR.glob(base + "_seg_*.wav"))
+    if not parts:
+        raise AudioError("ffmpeg 切片没有产出任何文件。")
+    return parts
+
+
 def cleanup() -> None:
     """启动时清掉上一轮遗留的转码中间产物（不影响 out/ 里的转写结果）。"""
     if WORK_DIR.is_dir():

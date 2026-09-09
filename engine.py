@@ -12,6 +12,7 @@ ROCm 的 HSA_OVERRIDE_GFX_VERSION 必须在进程启动前、也就是 dlopen �
 from __future__ import annotations
 
 import os
+import json
 import queue
 import re
 import signal
@@ -355,3 +356,33 @@ def dump_text(req: RunRequest, text: str, audio_path: str) -> Path:
     path = out_dir / (stem + FORMAT_SUFFIX.get(req.output_format, ".txt"))
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def dump_segmented(text: str, audio_path: str) -> Path:
+    """分段合并后的结果落盘到 runtime/out/，文件名带 _seg 后缀，始终是 JSON。"""
+    out_dir = ROOT / "runtime" / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(audio_path).stem[:60] or "transcript"
+    path = out_dir / (stem + "_seg.json")
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def parse_speaker_text(text: str) -> list[dict]:
+    """把引擎的 JSON（分段列表）收敛成 [{speaker, text}]，丢弃时间戳等无关字段。
+
+    既用于单段结果，也用于分段模式下逐段提取后合并——满足「每条结果仅需
+    speaker 与 text 两个字段」且「关闭时间标注」的要求。
+    """
+    try:
+        data = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out = []
+    for seg in data:
+        if not isinstance(seg, dict):
+            continue
+        out.append({"speaker": seg.get("speaker", ""), "text": seg.get("text", "")})
+    return out
