@@ -4,8 +4,9 @@
 Web 界面。模型单次前向就能同时产出**转写文本 + 说话人分离 + 时间戳**，这个界面负责把它
 变得点几下就能用：上传任意格式音频、选后端与输出格式、拿到可下载的字幕。
 
-界面只做转写与后端切换，没有做量化、模型信息页之类的附属功能。
-本项目只是 web 界面有关核心的更多内容， 建议查看上游项目[moss-transcribe.cpp](https://github.com/localai-org/moss-transcribe.cpp)
+* 界面只做转写与后端切换，没有做量化、模型信息页之类的附属功能。
+* 由于 GitHub 对大小的限制， 所以说 ROCM 的核心后端的库无法上传;可以去我云盘里下载,或者参考上游自行编译!链接：https://1813527308.share.123pan.cn/123pan/PawSVv-zN9hd?pwd=8M1f# 提取码：8M1f
+* 本项目只是 web 界面有关核心的更多内容， 建议查看上游项目[moss-transcribe.cpp](https://github.com/localai-org/moss-transcribe.cpp)
 
 ---
 
