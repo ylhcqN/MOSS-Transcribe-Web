@@ -1,0 +1,12 @@
+[project]
+name = "mossweb"
+version = "0.1.0"
+description = "moss-transcribe.cpp 的 Gradio Web 界面"
+requires-python = ">=3.10"
+dependencies = [
+    "gradio>=6.0",
+]
+
+# 这是个扁平脚本项目，不让 uv 把它当成一个待构建的 Python 包
+[tool.uv]
+package = false

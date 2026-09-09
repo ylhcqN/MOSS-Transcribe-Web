@@ -1,0 +1,40 @@
+# ---- Python / uv ----
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# ---- 运行时产物 ----
+# tmp/ 是 ffmpeg 转码中间文件（每次启动清空），out/ 是转写结果，都不入库
+runtime/
+
+# ---- 代理/工具的本地工作目录 ----
+.workbuddy/
+
+# ---- 本机配置 ----
+# 存的是 HSA_OVERRIDE_GFX_VERSION、上次用的后端、模型绝对路径等，因人而异
+mossweb.settings.json
+
+# ---- 大体积二进制 ----
+# 模型 648 MB；核心的 .so 每个 50~74 MB，而且后端是编译期绑定的，换台机器基本要重编。
+# 想让仓库自包含（把核心一起提交）的话，删掉下面 core/ 那三行即可。
+model/*.gguf
+core/**/*.so
+core/**/moss-transcribe
+core/**/vulkan-shaders-gen
+
+# ---- Gradio ----
+.gradio/
+gradio_cached_examples/
+
+# ---- 日志 ----
+*.log
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+*.swp
+*~
